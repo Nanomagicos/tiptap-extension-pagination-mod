@@ -23,6 +23,7 @@ export { DEFAULT_PAGE_AMENDMENT_CONFIG } from "./constants/pageAmendment";
 export { PageNode } from "./Nodes/Page";
 export { HeaderFooterNode } from "./Nodes/HeaderFooter";
 export { BodyNode } from "./Nodes/Body";
+export { PageBreakNode } from "./utils/nodes/pageBreak/pageBreakNode";
 export { isPageNode } from "./utils/nodes/page/page";
 export { getThisPageNodePosition } from "./utils/nodes/page/pagePosition";
 export { getPageNumber } from "./utils/nodes/page/pageNumber";

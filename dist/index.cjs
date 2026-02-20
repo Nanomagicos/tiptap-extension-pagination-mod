@@ -4472,6 +4472,11 @@ const getPaginationNodeAttributes = (editor, pageNum) => {
   };
 };
 
+const PAGE_BREAK_NODE_NAME$1 = "pageBreak";
+const isPageBreakNode = node => {
+  return !!node && node.type?.name === PAGE_BREAK_NODE_NAME$1;
+};
+
 /**
  * @file /src/utils/buildPageView.ts
  * @name BuildPageView
@@ -4479,10 +4484,6 @@ const getPaginationNodeAttributes = (editor, pageNum) => {
  */
 /**
  * Builds a new document with paginated content.
- *
- * @param view - The editor view.
- * @param options - The pagination options.
- * @returns {void}
  */
 const buildPageView = (editor, view, options) => {
   const {
@@ -4494,8 +4495,8 @@ const buildPageView = (editor, view, options) => {
   } = state;
   try {
     const contentNodes = collectContentNodes(doc);
+    // ⚠️ Cambios: medimos alturas, pero pageBreak debe medir 0 (no MIN_PARAGRAPH_HEIGHT)
     const nodeHeights = measureNodeHeights(view, contentNodes);
-    // Record the cursor's old position
     const {
       tr,
       selection
@@ -4505,7 +4506,6 @@ const buildPageView = (editor, view, options) => {
       newDoc,
       oldToNewPosMap
     } = buildNewDocument(editor, options, contentNodes, nodeHeights);
-    // Compare the content of the documents
     if (!newDoc.content.eq(doc.content)) {
       tr.replaceWith(0, doc.content.size, newDoc.content);
       tr.setMeta("pagination", true);
@@ -4520,22 +4520,15 @@ const buildPageView = (editor, view, options) => {
 };
 /**
  * Collect content nodes and their existing positions.
- *
- * @param doc - The document node.
- * @returns {NodePosArray} The content nodes and their positions.
  */
 const collectContentNodes = doc => {
   const contentNodes = [];
   doc.forEach((pageNode, pageOffset) => {
     if (isPageNode(pageNode)) {
       pageNode.forEach((pageRegionNode, pageRegionOffset) => {
-        // Offsets in forEach loop start from 0, however, the child nodes of any given node
-        // have a starting offset of 1 (for the first child)
         const truePageRegionOffset = pageRegionOffset + 1;
         if (isHeaderFooterNode(pageRegionNode)) ; else if (isBodyNode(pageRegionNode)) {
           pageRegionNode.forEach((child, childOffset) => {
-            // First child of body node (e.g. paragraph) has an offset of 1 more
-            // than the body node itself.
             const trueChildOffset = childOffset + 1;
             contentNodes.push({
               node: child,
@@ -4558,12 +4551,6 @@ const collectContentNodes = doc => {
   });
   return contentNodes;
 };
-/**
- * Calculates the margins of the element.
- *
- * @param element - The element to calculate margins for.
- * @returns {MarginConfig} The margins of the element.
- */
 const calculateElementMargins = element => {
   const style = window.getComputedStyle(element);
   return {
@@ -4574,11 +4561,9 @@ const calculateElementMargins = element => {
   };
 };
 /**
- * Measure the heights of the content nodes.
+ * Measure heights of the content nodes.
  *
- * @param view - The editor view.
- * @param contentNodes - The content nodes and their positions.
- * @returns {number[]} The heights of the content nodes.
+ * ⚠️ Cambio clave: pageBreak => altura 0 siempre
  */
 const measureNodeHeights = (view, contentNodes) => {
   const paragraphType = view.state.schema.nodes.paragraph;
@@ -4586,6 +4571,8 @@ const measureNodeHeights = (view, contentNodes) => {
     pos,
     node
   }) => {
+    // ✅ pageBreak no debe “contar” como altura, o se comporta como newline lógico
+    if (isPageBreakNode(node)) return 0;
     const domNode = view.nodeDOM(pos);
     if (domNode instanceof HTMLElement) {
       let {
@@ -4596,26 +4583,15 @@ const measureNodeHeights = (view, contentNodes) => {
       } = calculateElementMargins(domNode);
       if (height === 0) {
         if (node.type === paragraphType || node.isTextblock) {
-          // Assign a minimum height to empty paragraphs or textblocks
           height = MIN_PARAGRAPH_HEIGHT;
         }
       }
-      // We use top margin only because there is overlap of margins between paragraphs
       return height + marginTop;
     }
-    return MIN_PARAGRAPH_HEIGHT; // Default to minimum height if DOM element is not found
+    return MIN_PARAGRAPH_HEIGHT;
   });
   return nodeHeights;
 };
-/**
- * Build the new document and keep track of new positions.
- *
- * @param editor - The editor instance.
- * @param options - The pagination options.
- * @param contentNodes - The content nodes and their positions.
- * @param nodeHeights - The heights of the content nodes.
- * @returns {newDoc: PMNode, oldToNewPosMap: CursorMap} The new document and the mapping from old positions to new positions.
- */
 const buildNewDocument = (editor, options, contentNodes, nodeHeights) => {
   const {
     schema,
@@ -4642,9 +4618,7 @@ const buildNewDocument = (editor, options, contentNodes, nodeHeights) => {
     if (!headerFooterType) return;
     if (existingPageNode) {
       const hfNode = getPageRegionNode(existingPageNode, pageRegionType);
-      if (hfNode) {
-        return hfNode;
-      }
+      if (hfNode) return hfNode;
     }
     const emptyParagraph = paragraphType.create();
     return headerFooterType.create(headerFooterAttrs, [emptyParagraph]);
@@ -4673,20 +4647,41 @@ const buildNewDocument = (editor, options, contentNodes, nodeHeights) => {
     pages.push(pageNode);
     return pageNode;
   };
-  // Header is constructed prior to the body because we need to know its node size for the cursor mapping
   let currentPageHeader = constructHeader(pageRegionNodeAttributes.header);
   let currentPageContent = [];
   let currentHeight = 0;
   const oldToNewPosMap = new Map();
-  const pageOffset = 1,
-    bodyOffset = 1;
+  const pageOffset = 1;
+  const bodyOffset = 1;
   let cumulativeNewDocPos = pageOffset + getMaybeNodeSize(currentPageHeader) + bodyOffset;
+  let endedWithPageBreak = false;
   for (let i = 0; i < contentNodes.length; i++) {
     const {
       node,
       pos: oldPos
     } = contentNodes[i];
     const nodeHeight = nodeHeights[i];
+    // ✅ Cambio clave: pageBreak corta página, pero NO se guarda y NO se mapea
+    // y NO debe afectar height/cursor mapping.
+    if (isPageBreakNode(node)) {
+      const pageNode = addPage(currentPageContent);
+      cumulativeNewDocPos += pageNode.nodeSize - getMaybeNodeSize(currentPageHeader);
+      currentPageContent = [];
+      currentHeight = 0;
+      existingPageNode = doc.maybeChild(++pageNum);
+      if (isPageNumInRange(doc, pageNum)) {
+        ({
+          pageNodeAttributes,
+          pageRegionNodeAttributes,
+          bodyPixelDimensions
+        } = getPaginationNodeAttributes(editor, pageNum));
+      }
+      currentPageHeader = constructHeader(pageRegionNodeAttributes.header);
+      cumulativeNewDocPos += getMaybeNodeSize(currentPageHeader);
+      endedWithPageBreak = true;
+      continue;
+    }
+    endedWithPageBreak = false;
     const isPageFull = currentHeight + nodeHeight > bodyPixelDimensions.bodyHeight;
     if (isPageFull && currentPageContent.length > 0) {
       const pageNode = addPage(currentPageContent);
@@ -4701,21 +4696,20 @@ const buildNewDocument = (editor, options, contentNodes, nodeHeights) => {
           bodyPixelDimensions
         } = getPaginationNodeAttributes(editor, pageNum));
       }
-      // Next page header
       currentPageHeader = constructHeader(pageRegionNodeAttributes.header);
       cumulativeNewDocPos += getMaybeNodeSize(currentPageHeader);
     }
-    // Record the mapping from old position to new position
+    // ⚠️ Cambio: no queremos mapear “puntos” si nodeHeight 0 por alguna razón rara,
+    // pero aquí SOLO pageBreak es 0 y ya lo filtramos arriba.
     const nodeStartPosInNewDoc = cumulativeNewDocPos + currentPageContent.reduce((sum, n) => sum + n.nodeSize, 0);
     oldToNewPosMap.set(oldPos, nodeStartPosInNewDoc);
     currentPageContent.push(node);
     currentHeight += nodeHeight;
   }
-  if (currentPageContent.length > 0) {
-    // Add final page (may not be full)
+  if (endedWithPageBreak) {
+    addPage([]);
+  } else if (currentPageContent.length > 0) {
     addPage(currentPageContent);
-  } else {
-    pageNum--;
   }
   const newDoc = schema.topNodeType.create(null, pages);
   const docSize = newDoc.content.size;
@@ -4725,14 +4719,6 @@ const buildNewDocument = (editor, options, contentNodes, nodeHeights) => {
     oldToNewPosMap
   };
 };
-/**
- * Limit mapped cursor positions to document size to prevent out of bounds errors
- * when setting the cursor position.
- *
- * @param oldToNewPosMap - The mapping from old positions to new positions.
- * @param docSize - The size of the new document.
- * @returns {void}
- */
 const limitMappedCursorPositions = (oldToNewPosMap, docSize) => {
   oldToNewPosMap.forEach((newPos, oldPos) => {
     if (newPos > docSize) {
@@ -4741,13 +4727,9 @@ const limitMappedCursorPositions = (oldToNewPosMap, docSize) => {
   });
 };
 /**
- * Map the cursor position from the old document to the new document.
+ * Map cursor position old -> new.
  *
- * @param contentNodes - The content nodes and their positions.
- * @param oldCursorPos - The old cursor position.
- * @param oldToNewPosMap - The mapping from old positions to new positions.
- * @param newDocContentSize - The size of the new document. Serves as maximum limit for cursor position.
- * @returns {number} The new cursor position.
+ * ✅ Cambio: si el cursor estaba “sobre” pageBreak, lo movemos al siguiente bloque válido.
  */
 const mapCursorPosition = (contentNodes, oldCursorPos, oldToNewPosMap, newDocContentSize) => {
   let newCursorPos = null;
@@ -4758,6 +4740,20 @@ const mapCursorPosition = (contentNodes, oldCursorPos, oldToNewPosMap, newDocCon
     } = contentNodes[i];
     const nodeSize = node.nodeSize;
     if (inRange(oldCursorPos, oldNodePos, oldNodePos + nodeSize)) {
+      // ✅ Si cae en pageBreak, saltamos al próximo nodo “real”
+      if (isPageBreakNode(node)) {
+        // intenta mapear el siguiente nodo
+        for (let j = i + 1; j < contentNodes.length; j++) {
+          const next = contentNodes[j];
+          if (!isPageBreakNode(next.node)) {
+            const mapped = oldToNewPosMap.get(next.pos);
+            newCursorPos = mapped !== undefined ? Math.min(mapped, newDocContentSize - 1) : newDocContentSize - 1;
+            return newCursorPos;
+          }
+        }
+        // si no hay siguiente, al final
+        return newDocContentSize - 1;
+      }
       const offsetInNode = oldCursorPos - oldNodePos;
       const newNodePos = oldToNewPosMap.get(oldNodePos);
       if (newNodePos === undefined) {
@@ -4771,32 +4767,12 @@ const mapCursorPosition = (contentNodes, oldCursorPos, oldToNewPosMap, newDocCon
   }
   return newCursorPos;
 };
-/**
- * Check if the given position is at the start of a text block.
- *
- * @param doc - The document node.
- * @param $pos - The resolved position in the document.
- * @returns {boolean} True if the position is at the start of a text block, false otherwise.
- */
 const isNodeBeforeAvailable = $pos => {
   return !!$pos.nodeBefore && (isTextNode($pos.nodeBefore) || isParagraphNode($pos.nodeBefore));
 };
-/**
- * Check if the given position is at the end of a text block.
- *
- * @param doc - The document node.
- * @param $pos - The resolved position in the document.
- * @returns {boolean} True if the position is at the end of a text block, false otherwise.
- */
 const isNodeAfterAvailable = $pos => {
   return !!$pos.nodeAfter && (isTextNode($pos.nodeAfter) || isParagraphNode($pos.nodeAfter));
 };
-/**
- * Sets the cursor selection after creating the new document.
- *
- * @param tr - The current transaction.
- * @returns {void}
- */
 const paginationUpdateCursorPosition = (tr, newCursorPos) => {
   if (newCursorPos !== null) {
     const $pos = tr.doc.resolve(newCursorPos);
@@ -4809,7 +4785,6 @@ const paginationUpdateCursorPosition = (tr, newCursorPos) => {
     if (selection) {
       setSelection(tr, selection);
     } else {
-      // Fallback to a safe selection at the end of the document
       setSelectionAtEndOfDocument(tr);
     }
   } else {
@@ -5525,6 +5500,53 @@ const BodyNode = core.Node.create({
   }
 });
 
+// src/utils/nodes/pageBreak/pageBreakNode.ts
+const PAGE_BREAK_NODE_NAME = "pageBreak";
+const PageBreakNode = core.Node.create({
+  name: PAGE_BREAK_NODE_NAME,
+  /**
+   * Importante:
+   * - group: "block" para que pueda convivir entre bloques dentro de body.
+   * - atom: true para que sea una unidad (no editable).
+   * - isolating: true para que ProseMirror no intente “fusionarlo” raro con vecinos.
+   * - selectable: false para que el cursor no se quede pegado ahí.
+   */
+  group: "block",
+  atom: true,
+  isolating: true,
+  selectable: false,
+  draggable: false,
+  /**
+   * Evita que se quede como “bloque vacío” visible.
+   * `defining: true` ayuda a que el editor preserve este node con más fidelidad
+   * en transforms.
+   */
+  defining: true,
+  /**
+   * Parse seguro para HTML import/export.
+   * Nota: en tu código había un mismatch: parse buscaba data-page-break="true"
+   * pero render ponía data-page-break (sin valor). Aquí lo alineamos.
+   */
+  parseHTML() {
+    return [{
+      tag: `div[data-page-break="true"]`
+    }, {
+      tag: `span[data-page-break="true"]`
+    }];
+  },
+  renderHTML({
+    HTMLAttributes
+  }) {
+    // Cero espacio real, cero márgenes, no seleccionable, no afecte layout
+    // y sigue siendo exportable/importable.
+    return ["span", core.mergeAttributes(HTMLAttributes, {
+      "data-page-break": "true",
+      "aria-hidden": "true",
+      style: ["display:block", "height:0", "line-height:0", "margin:0", "padding:0", "border:0", "overflow:hidden", "pointer-events:none"].join(";")
+    })];
+  }
+});
+
 /**
  * @file /src/index.ts
  * @name Index
@@ -5543,6 +5565,7 @@ exports.DEFAULT_PAPER_ORIENTATION = DEFAULT_PAPER_ORIENTATION;
 exports.DEFAULT_PAPER_SIZE = DEFAULT_PAPER_SIZE;
 exports.HeaderFooterNode = HeaderFooterNode;
 exports.LIGHT_PAPER_COLOUR = LIGHT_PAPER_COLOUR;
+exports.PageBreakNode = PageBreakNode;
 exports.PageNode = PageNode;
 exports.commonMarginConfigs = commonMarginConfigs;
 exports.default = PaginationExtension;
